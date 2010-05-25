@@ -8,11 +8,11 @@ require 'mocha'
 require 'yaml'
 require 'active_merchant'
 
-begin
-  gem 'actionpack'
-rescue LoadError
-  raise StandardError, "The view tests need ActionPack installed as gem to run"
-end
+#begin
+  #gem 'actionpack'
+#rescue LoadError
+  #raise StandardError, "The view tests need ActionPack installed as gem to run"
+#end
 
 require 'action_controller'
 require 'action_controller/test_process'
