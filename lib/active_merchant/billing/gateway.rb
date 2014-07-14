@@ -4,27 +4,24 @@ require 'active_merchant/billing/response'
 
 module ActiveMerchant #:nodoc:
   module Billing #:nodoc:
-    # 
+    #
     # == Description
-    # The Gateway class is the base class for all ActiveMerchant gateway implementations. 
-    # 
+    # The Gateway class is the base class for all ActiveMerchant gateway implementations.
+    #
     # The standard list of gateway functions that most concrete gateway subclasses implement is:
-    # 
-    # * <tt>purchase(money, creditcard, options = {})</tt>
-    # * <tt>authorize(money, creditcard, options = {})</tt>
+    #
+    # * <tt>purchase(money, credit_card, options = {})</tt>
+    # * <tt>authorize(money, credit_card, options = {})</tt>
     # * <tt>capture(money, authorization, options = {})</tt>
     # * <tt>void(identification, options = {})</tt>
-    # * <tt>credit(money, identification, options = {})</tt>
-    #
-    # Some gateways include features for recurring billing
-    #
-    # * <tt>recurring(money, creditcard, options = {})</tt>
+    # * <tt>refund(money, identification, options = {})</tt>
+    # * <tt>verify(credit_card, options = {})</tt>
     #
     # Some gateways also support features for storing credit cards:
     #
-    # * <tt>store(creditcard, options = {})</tt>
+    # * <tt>store(credit_card, options = {})</tt>
     # * <tt>unstore(identification, options = {})</tt>
-    # 
+    #
     # === Gateway Options
     # The options hash consists of the following options:
     #
@@ -38,9 +35,9 @@ module ActiveMerchant #:nodoc:
     # * <tt>:currency</tt> - The currency of the transaction.  Only important when you are using a currency that is not the default with a gateway that supports multiple currencies.
     # * <tt>:billing_address</tt> - A hash containing the billing address of the customer.
     # * <tt>:shipping_address</tt> - A hash containing the shipping address of the customer.
-    # 
+    #
     # The <tt>:billing_address</tt>, and <tt>:shipping_address</tt> hashes can have the following keys:
-    # 
+    #
     # * <tt>:name</tt> - The full name of the customer.
     # * <tt>:company</tt> - The company name of the customer.
     # * <tt>:address1</tt> - The primary street address of the customer.
@@ -53,96 +50,141 @@ module ActiveMerchant #:nodoc:
     #
     # == Implmenting new gateways
     #
-    # See the {ActiveMerchant Guide to Contributing}[http://code.google.com/p/activemerchant/wiki/Contributing]
+    # See the {ActiveMerchant Guide to Contributing}[https://github.com/Shopify/active_merchant/wiki/Contributing]
     #
     class Gateway
       include PostsData
-      include RequiresParameters
       include CreditCardFormatting
-      include Utils
-      
+
       DEBIT_CARDS = [ :switch, :solo ]
-      CURRENCIES_WITHOUT_FRACTIONS = [ 'JPY' ]
+      CURRENCIES_WITHOUT_FRACTIONS = [ 'BIF', 'BYR', 'CLP', 'CVE', 'DJF', 'GNF', 'HUF', 'ISK', 'JPY', 'KMF', 'KRW', 'PYG', 'RWF', 'TWD', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF' ]
       CREDIT_DEPRECATION_MESSAGE = "Support for using credit to refund existing transactions is deprecated and will be removed from a future release of ActiveMerchant. Please use the refund method instead."
-            
+      RECURRING_DEPRECATION_MESSAGE = "Recurring functionality in ActiveMerchant is deprecated and will be removed in a future version. Please contact the ActiveMerchant maintainers if you have an interest in taking ownership of a separate gem that continues support for it."
+
       cattr_reader :implementations
       @@implementations = []
-      
+
       def self.inherited(subclass)
         super
         @@implementations << subclass
       end
-    
+
+      def generate_unique_id
+        SecureRandom.hex(16)
+      end
+
       # The format of the amounts used by the gateway
       # :dollars => '12.50'
       # :cents => '1250'
       class_attribute :money_format
       self.money_format = :dollars
-      
+
       # The default currency for the transactions if no currency is provided
       class_attribute :default_currency
-      
-      # The countries of merchants the gateway supports
-      class_attribute :supported_countries
-      self.supported_countries = []
-      
+
       # The supported card types for the gateway
       class_attribute :supported_cardtypes
       self.supported_cardtypes = []
-      
+
       class_attribute :homepage_url
       class_attribute :display_name
-      
+
+      class_attribute :test_url, :live_url
+
+      class_attribute :abstract_class
+
+      self.abstract_class = false
+
       # The application making the calls to the gateway
       # Useful for things like the PayPal build notation (BN) id fields
       superclass_delegating_accessor :application_id
       self.application_id = 'ActiveMerchant'
-      
+
       attr_reader :options
-      
+
       # Use this method to check if your gateway of interest supports a credit card of some type
       def self.supports?(card_type)
         supported_cardtypes.include?(card_type.to_sym)
       end
-      
+
       def self.card_brand(source)
         result = source.respond_to?(:brand) ? source.brand : source.type
         result.to_s.downcase
       end
-    
+
+      def self.supported_countries=(country_codes)
+        country_codes.each do |country_code|
+          unless ActiveMerchant::Country.find(country_code)
+            raise ActiveMerchant::InvalidCountryCodeError, "No country could be found for the country #{country_code}"
+          end
+        end
+        @supported_countries = country_codes.dup
+      end
+
+      def self.supported_countries
+        @supported_countries ||= []
+      end
+
+      def supported_countries
+        self.class.supported_countries
+      end
+
       def card_brand(source)
         self.class.card_brand(source)
       end
-    
+
       # Initialize a new gateway.
-      # 
-      # See the documentation for the gateway you will be using to make sure there are no other 
+      #
+      # See the documentation for the gateway you will be using to make sure there are no other
       # required options.
       def initialize(options = {})
+        @options = options
       end
-                                     
+
       # Are we running in test mode?
       def test?
-        Base.gateway_mode == :test
+        (@options.has_key?(:test) ? @options[:test] : Base.test?)
       end
-            
+
+      protected # :nodoc: all
+
+      def normalize(field)
+        case field
+          when "true"   then true
+          when "false"  then false
+          when ""       then nil
+          when "null"   then nil
+          else field
+        end
+      end
+
+      def user_agent
+        @@ua ||= JSON.dump({
+          :bindings_version => ActiveMerchant::VERSION,
+          :lang => 'ruby',
+          :lang_version => "#{RUBY_VERSION} p#{RUBY_PATCHLEVEL} (#{RUBY_RELEASE_DATE})",
+          :platform => RUBY_PLATFORM,
+          :publisher => 'active_merchant'
+        })
+      end
+
       private # :nodoc: all
 
-      def name 
+      def name
         self.class.name.scan(/\:\:(\w+)Gateway/).flatten.first
       end
-      
+
       def amount(money)
         return nil if money.nil?
         cents = if money.respond_to?(:cents)
-          deprecated "Support for Money objects is deprecated and will be removed from a future release of ActiveMerchant. Please use an Integer value in cents"
+          ActiveMerchant.deprecated "Support for Money objects is deprecated and will be removed from a future release of ActiveMerchant. Please use an Integer value in cents"
           money.cents
         else
           money
         end
 
-        if money.is_a?(String) 
-          raise ArgumentError, 'money amount must be a positive Integer in cents.' 
+        if money.is_a?(String)
+          raise ArgumentError, 'money amount must be a positive Integer in cents.'
         end
 
         if self.money_format == :cents
@@ -154,16 +196,40 @@ module ActiveMerchant #:nodoc:
 
       def localized_amount(money, currency)
         amount = amount(money)
-        CURRENCIES_WITHOUT_FRACTIONS.include?(currency.to_s) ? amount.split('.').first : amount
+
+        return amount unless non_fractional_currency?(currency)
+
+        if self.money_format == :cents
+          sprintf("%.0f", amount.to_f / 100)
+        else
+          amount.split('.').first
+        end
       end
-      
+
+      def non_fractional_currency?(currency)
+        CURRENCIES_WITHOUT_FRACTIONS.include?(currency.to_s)
+      end
+
       def currency(money)
         money.respond_to?(:currency) ? money.currency : self.default_currency
       end
-      
+
       def requires_start_date_or_issue_number?(credit_card)
         return false if card_brand(credit_card).blank?
         DEBIT_CARDS.include?(card_brand(credit_card).to_sym)
+      end
+
+      def requires!(hash, *params)
+        params.each do |param|
+          if param.is_a?(Array)
+            raise ArgumentError.new("Missing required parameter: #{param.first}") unless hash.has_key?(param.first)
+
+            valid_options = param[1..-1]
+            raise ArgumentError.new("Parameter: #{param.first} must be one of #{valid_options.to_sentence(:words_connector => 'or')}") unless valid_options.include?(hash[param.first])
+          else
+            raise ArgumentError.new("Missing required parameter: #{param}") unless hash.has_key?(param)
+          end
+        end
       end
     end
   end
